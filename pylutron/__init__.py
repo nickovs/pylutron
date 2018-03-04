@@ -278,13 +278,13 @@ class Lutron(object):
     self._subscribers = {}
     self.areas = []
 
-  def subscribe(self, obj, handler):
+  def subscribe(self, obj, handler, send_args=False, context=None):
     """Subscribes to status updates of the requested object.
 
     The handler will be invoked when the controller sends a notification
     regarding changed state. The user can then further query the object for the
     state itself."""
-    self._subscribers[obj] = handler
+    self._subscribers[obj] = (handler, send_args, context)
 
   def register_id(self, cmd_type, obj):
     """Registers an object (through its integration id) to receive update
@@ -320,7 +320,11 @@ class Lutron(object):
     handled = obj.handle_update(args)
     # Now notify anyone who cares that device  may have changed
     if handled and obj in self._subscribers:
-      self._subscribers[obj](obj)
+      handler, send_args, context = self._subscribers[obj]
+      if send_args:
+        handler(obj, args, context)
+      else:
+        handler(obj)
 
   def connect(self):
     """Connects to the Lutron controller to send and receive commands and status"""
@@ -402,11 +406,16 @@ class LutronEntity(object):
   """Base class for all the Lutron objects we'd like to manage. Just holds basic
   common info we'd rather not manage repeatedly."""
 
+  CMD_TYPE = None
+  
   def __init__(self, lutron, name, integration_id):
     """Initializes the base class with common, basic data."""
     self._lutron = lutron
     self._name = name
     self._integration_id = integration_id
+    if self.CMD_TYPE:
+      self._lutron.register_id(self.CMD_TYPE, self)
+
 
   @property
   def name(self):
@@ -442,8 +451,6 @@ class Output(LutronEntity):
     self._output_type = output_type
     self._level = 0.0
     self._query_waiters = _RequestHelper()
-
-    self._lutron.register_id(Output.CMD_TYPE, self)
 
   def __str__(self):
     """Returns a pretty-printed string for this object."""
@@ -563,7 +570,6 @@ class Keypad(LutronEntity):
     """Initializes the Keypad object."""
     super(Keypad, self).__init__(lutron, name, integration_id)
     self._buttons = []
-    self._lutron.register_id(Keypad.CMD_TYPE, self)
 
   def add_button(self, button):
     """Adds a button that's part of this keypad. We'll use this to
@@ -585,18 +591,30 @@ class Keypad(LutronEntity):
     return True
 
 
-class MotionSensor(object):
-  """Placeholder class for the motion sensor device.
-  
-  TODO: Actually implement this.
+class MotionSensor(LutronEntity):
+  """Object representing a Lutron motion sensor device.
+
+  The sensor state represents the last transistion event that we received.
   """
+
+  CMD_TYPE = 'DEVICE'
+
   def __init__(self, lutron, name, integration_id):
-    """Initializes the motion sensor object."""
-    self._lutron = lutron
-    self._name = name
-    self._integration_id = integration_id
+    """Initializes the MotionSensor object."""
+    super(Keypad, self).__init__(lutron, name, integration_id)
+    self._state = None
 
+  def handle_update(self, args):
+    action = int(args[1])
+    self._state = True if action == 3 else (False if action == 4 else None)
+    _LOGGER.debug("Motion sensor: %d(%s): %s" % (self._integration_id, self._name, state))
+    return True
 
+  @property
+  def state(self):
+    return self._state
+
+  
 class Area(object):
   """An area (i.e. a room) that contains devices/outputs/etc."""
   def __init__(self, lutron, name, integration_id, occupancy_group_id):
