@@ -12,6 +12,7 @@ import logging
 import telnetlib
 import threading
 import time
+import socket
 
 from typing import Any, Callable, Dict, Type
 
@@ -67,6 +68,7 @@ class LutronConnection(threading.Thread):
     # After starting the thread we wait for it to post us
     # an event signifying that connection is established. This
     # ensures that the caller only resumes when we are fully connected.
+    _LOGGER.info("Starting connection")
     self.start()
     with self._lock:
       self._connect_cond.wait_for(lambda: self._connected)
@@ -79,7 +81,7 @@ class LutronConnection(threading.Thread):
     _LOGGER.debug("Sending: %s" % cmd)
     try:
       self._telnet.write(cmd.encode('ascii') + b'\r\n')
-    except BrokenPipeError:
+    except (ConnectionError, TimeoutError):
       self._disconnect_locked()
 
   def send(self, cmd):
@@ -87,6 +89,7 @@ class LutronConnection(threading.Thread):
 
     Must not hold self._lock.
     """
+    self._maybe_reconnect()
     with self._lock:
       self._send_locked(cmd)
 
@@ -118,6 +121,22 @@ class LutronConnection(threading.Thread):
   def _maybe_reconnect(self):
     """Reconnects to the controller if we have been previously disconnected."""
     with self._lock:
+      # Check if the socket is alive. If the socket would block reading or
+      # would return something then it is alive. If it would return with no
+      # data then it has closed itself.
+      try:
+        if self._telnet:
+          d = self._telnet.get_socket().recv(1, socket.MSG_DONTWAIT | socket.MSG_PEEK)
+        else:
+          # We don't need to disconnect if the socket is already closed
+          d = True
+      except BlockingIOError:
+        d = True
+
+      if not d:
+        _LOGGER.info("Socket was stale; disconnecting")
+        self._disconnect_locked()
+
       if not self._connected: 
         _LOGGER.info("Connecting")
         self._do_login_locked()
@@ -147,6 +166,7 @@ class LutronConnection(threading.Thread):
         finally:
           self._lock.release()
       self._recv_cb(line.decode('ascii').rstrip())
+    _LOGGER.warn("Receiver thread terminating")
 
 
 class LutronXmlDbParser(object):
